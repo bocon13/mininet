@@ -1,0 +1,9 @@
+language: python
+sudo: required
+dist: trusty
+
+script:
+- ls
+- sudo mininet/util/vm/build.py -v --branch master --test sanity trusty64server --chown `whoami`
+
+
