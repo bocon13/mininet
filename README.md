@@ -1,5 +1,6 @@
 Mininet: Rapid Prototyping for Software Defined Networks
 ========================================================
+[![Build Status](https://travis-ci.org/bocon13/mininet.svg?branch=master)](https://travis-ci.org/bocon13/mininet)
 
 *The best way to emulate almost any network on your laptop!*
 
