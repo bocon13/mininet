@@ -11,4 +11,5 @@ install:
 
 script:
 - sudo mn --test pingall
+- sudo python mininet/test/runner.py -v -quick
 - sudo python examples/test/runner.py -v -quick
