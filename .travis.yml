@@ -7,7 +7,7 @@ before_install:
 - sudo apt-get install -qq vlan
 
 install:
-- sudo util/install.sh -fnv
+- sudo util/install.sh -a
 
 script:
 - sudo mn --test pingall
