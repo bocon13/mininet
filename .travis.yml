@@ -3,7 +3,7 @@ sudo: required
 dist: trusty
 
 install:
-- sudo mininet/util/install.sh -fnv
+- sudo util/install.sh -fnv
 
 script:
 - sudo mn --test pingall
