@@ -46,6 +46,7 @@ void usage(char *name)
            "  -P: run in a new pid namespace (implies -m)\n"
            "  -u: run in a new UTS (ipc, hostname) namespace\n"
            "  -p: print ^A + pid\n"
+           "  -w: write pid to the specified fd\n"
            "  -a pid: attach to pid's namespaces\n"
            "  -g group: add to cgroup\n"
            "  -r rtprio: run with SCHED_RR (usually requires -g)\n"
@@ -197,8 +198,9 @@ int main(int argc, char *argv[])
     int printpid = 0;
     int rtprio = 0;
     int dofork = 0;
+    int pidPipe = 0;
 
-    while ((c = getopt(argc, argv, "+cdmnPpa:g:r:uvh")) != -1)
+    while ((c = getopt(argc, argv, "+cdmnPpa:g:r:w:uvh")) != -1)
         switch(c) {
             case 'c':   closefds = 1; break;
             case 'd':   detachtty = 1; break;
@@ -210,6 +212,7 @@ int main(int argc, char *argv[])
             case 'g':   cgrouparg = optarg ; break;
             case 'r':   rtprio = atoi(optarg); break;
             case 'u':   flags |= CLONE_NEWUTS; break;
+            case 'w':   pidPipe = atoi(optarg); break;
             case 'v':   printf("%s\n", VERSION); exit(0);
             case 'h':   usage(argv[0]); exit(0);
             default:    usage(argv[0]); exit(1);
@@ -218,7 +221,10 @@ int main(int argc, char *argv[])
     if (closefds) {
         /* close file descriptors except stdin/out/error */
         int fd;
-        for (fd = getdtablesize(); fd > 2; fd--) close(fd);
+        for (fd = getdtablesize(); fd > 2; fd--){
+            if (fd == pidPipe) continue;
+            close(fd);
+        }
     }
 
     if (attachpid) {
@@ -270,6 +276,14 @@ int main(int argc, char *argv[])
                     printf("\001%d\n", pid);
                     fflush(stdout);
                 }
+                if (pidPipe) {
+                    char buf[20];
+                    int n = sprintf(buf, "%d", pid);
+                    if (write(pidPipe, buf, n+1) < 0) {
+                        perror("writing pid to fd");
+                        return 1;
+                    }
+                }
                 /* For pid namespace, we need to fork and wait for child ;-( */
                 if (flags & CLONE_NEWPID) {
                      wait(&status);
@@ -278,11 +292,21 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (printpid && !dofork) {
-        /* Print child pid if we didn't fork/aren't in a pidns */
+    if (!dofork) {
         assert(!(flags & CLONE_NEWPID));
-        printf("\001%d\n", getpid());
-        fflush(stdout);
+        /* Print child pid if we didn't fork/aren't in a pidns */
+        if (printpid) {
+            printf("\001%d\n", getpid());
+            fflush(stdout);
+        }
+        if (pidPipe) {
+            char buf[20];
+            int n = snprintf(buf, 20, "%d", getpid());
+            if (write(pidPipe, buf, n+1) < 0) {
+                perror("writing pid to fd");
+                return 1;
+            }
+        }
     }
 
 
@@ -321,6 +345,13 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
+
+
+    if (closefds && pidPipe > 2) {
+        /* Close pidPipe if set */
+        close(pidPipe);
+    }
+
 
     if (optind < argc) {
         execvp(argv[optind], &argv[optind]);
