@@ -61,6 +61,19 @@ int setns(int fd, int nstype)
 }
 #endif
 
+struct namespace {
+    int type;
+    const char *name;
+};
+
+/* List of namespaces supported by this command */
+static struct namespace namespaces[] = {
+    { CLONE_NEWNET, "net" },
+    { CLONE_NEWPID, "pid" },
+    { CLONE_NEWUTS, "uts" },
+    { CLONE_NEWNS,  "mnt" }
+};
+
 
 /* Validate alphanumeric path foo1/bar2/baz */
 void validate(char *path)
@@ -105,62 +118,69 @@ void cgroup(char *gname)
 }
 
 
-/* Attach to ns 'name' if present; return 1 if pidns */
-int attachns( pid_t pid, char *name ) {
-    char path[PATH_MAX];
+/* Attach to ns if present.
+   Returns ns flag (> 0) on success, 0 if ns is not different from caller's, and < 0 on err */
+int attachns(pid_t pid, const struct namespace *ns) {
+    char path[PATH_MAX], self[PATH_MAX];
     int nsid, err;
     int pidns = 0;
 
-    snprintf(path, PATH_MAX, "/proc/%d/ns/%s", pid, name) ;
+    snprintf(path, PATH_MAX, "/proc/%d/ns/%s", pid, ns->name);
+    snprintf(self, PATH_MAX, "/proc/self/ns/%s", ns->name);
 
-    if ((nsid = open(path, O_RDONLY)) < 0)
+    struct stat buf1, buf2;
+    int stat1 = stat(path, &buf1);
+    int stat2 = stat(self, &buf2);
+    /* Don't reattach to the same ns */
+    if (stat1 == 0 && stat2 == 0 &&
+        buf1.st_dev == buf2.st_dev &&
+        buf1.st_ino == buf2.st_ino)
+        return 0;
+
+    if ((nsid = open(path, O_RDONLY)) < 0) {
+        perror("open");
+        fprintf(stderr, "Could not open: %s\n", path);
         return nsid;
-
-    if (strcmp(name, "pid") == 0) {
-        struct stat buf1, buf2;
-        int stat1 = stat(path, &buf1);
-        int stat2 = stat("/proc/self/ns/pid", &buf2);
-        /* Don't reattach to the same pid ns */
-        if (stat1 == 0 && stat2 == 0 &&
-            buf1.st_dev == buf2.st_dev &&
-            buf1.st_ino == buf2.st_ino)
-            return 0;
-        pidns = 1;
     }
 
     if ((err = setns(nsid, 0)) < 0) {
         perror("setns");
+        fprintf(stderr, "Could not attach to %s namespace\n", ns->name);
         return err;
     }
 
-    return pidns;
+    return ns->type;
 }
 
-/* Attach to pid's namespaces - returns 1 if pidns */
+/* Attach to pid's namespaces; returns flags of mounted namespaces */
 int attach(int pid) {
-
     char *cwd = get_current_dir_name();
     char path[PATH_MAX];
-    int pidns = 0;
+    int flag = 0, ret = 0;
 
-    attachns(pid, "net");
-    attachns(pid, "uts");
-    if (attachns(pid, "pid") == 1)
-        pidns = 1;
-
-    if (attachns(pid, "mnt") != 0) {
-        /* Plan B: chroot into pid's root file system */
-        sprintf(path, "/proc/%d/root", pid);
-        if (chroot(path) < 0) {
-            perror(path);
+    int len = sizeof(namespaces) / sizeof(struct namespace);
+    for (struct namespace *ns = namespaces; ns < namespaces + len; ns++) {
+        if ((ret = attachns(pid, ns)) < 0) {
+            if (ns->type == CLONE_NEWNS) {
+                /* Plan B: chroot into pid's root file system */
+                sprintf(path, "/proc/%d/root", pid);
+                if (chroot(path) < 0) {
+                    perror(path);
+                    return -1;
+                }
+            }
+            else return -1;
         }
+        flag |= ret;
     }
 
     /* chdir to correct working directory */
-    if (chdir(cwd) != 0)
+    if (chdir(cwd) != 0) {
         perror(cwd);
+        return -1;
+    }
 
-    return pidns;
+    return flag;
 }
 
 
@@ -176,15 +196,14 @@ int main(int argc, char *argv[])
     int detachtty = 0;
     int printpid = 0;
     int rtprio = 0;
-    int pidns = 0;
     int dofork = 0;
 
     while ((c = getopt(argc, argv, "+cdmnPpa:g:r:uvh")) != -1)
         switch(c) {
-            case 'c': closefds = 1; break;
+            case 'c':   closefds = 1; break;
             case 'd':   detachtty = 1; break;
             case 'm':   flags |= CLONE_NEWNS; break;
-            case 'n':   flags |= CLONE_NEWNET; break;
+            case 'n':   flags |= CLONE_NEWNET | CLONE_NEWNS; break;
             case 'p':   printpid = 1; break;
             case 'P':   flags |= CLONE_NEWPID | CLONE_NEWNS; break;
             case 'a':   attachpid = atoi(optarg);break;
@@ -202,9 +221,11 @@ int main(int argc, char *argv[])
         for (fd = getdtablesize(); fd > 2; fd--) close(fd);
     }
 
-    if (attachpid)
+    if (attachpid) {
         /* Attach to existing namespace(s) */
-        pidns = attach(attachpid);
+        if((flags = attach(attachpid)) == -1)
+            return 1;
+    }
     else {
         /* Create new namespace(s) */
         if (unshare(flags) == -1) {
@@ -213,7 +234,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (flags & CLONE_NEWPID || pidns)
+    if (flags & CLONE_NEWPID)
         /* pidns requires fork/wait; child will be pid 1 */
         dofork = 1;
 
@@ -250,7 +271,7 @@ int main(int argc, char *argv[])
                     fflush(stdout);
                 }
                 /* For pid namespace, we need to fork and wait for child ;-( */
-                if (flags & CLONE_NEWPID || pidns) {
+                if (flags & CLONE_NEWPID) {
                      wait(&status);
                 }
                 return 0;
@@ -259,28 +280,37 @@ int main(int argc, char *argv[])
 
     if (printpid && !dofork) {
         /* Print child pid if we didn't fork/aren't in a pidns */
-        assert(!pidns);
+        assert(!(flags & CLONE_NEWPID));
         printf("\001%d\n", getpid());
         fflush(stdout);
     }
 
-    if (flags & CLONE_NEWPID) {
-        /* Child remounts /proc for ps */
-        if (mount("proc", "/proc", "proc", MS_MGC_VAL, NULL) == -1) {
-            perror("mountproc");
-        }
-    }
 
     /* Attach to cgroup if necessary */
     if (cgrouparg) cgroup(cgrouparg);
 
-    if (flags & CLONE_NEWNET & CLONE_NEWNS) {
-        /* Mount sysfs to pick up the new network namespace */
-        if (mount("sysfs", "/sys", "sysfs", MS_MGC_VAL, NULL) == -1) {
-            perror("mount");
+    if (!attachpid && flags & CLONE_NEWNS) {
+        /* Set the whole hierarchy propagation to private */
+        if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL) == -1) {
+            perror("set / propagation to private");
             return 1;
         }
+        if (flags & CLONE_NEWNET) {
+            /* Mount sysfs to pick up the new network namespace */
+            if (mount("sysfs", "/sys", "sysfs", MS_MGC_VAL, NULL) == -1) {
+                perror("mount /sys");
+                return 1;
+            }
+        }
+        if (flags & CLONE_NEWPID) {
+            /* Child remounts /proc for ps */
+            if (mount("proc", "/proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) == -1) {
+                perror("mount /proc");
+                return 1;
+            }
+        }
     }
+
 
     if (rtprio != 0) {
         /* Set RT scheduling priority */
